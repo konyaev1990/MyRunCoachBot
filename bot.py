@@ -1,14 +1,12 @@
+
 import os
-import logging
 from flask import Flask, request
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
-from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
+from telegram import Update, Bot, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters, ConversationHandler
 
-# Включаем логирование
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+TOKEN = os.getenv("TOKEN")
 
-TOKEN = os.getenv("TOKEN")  # Лучше брать из переменных окружения на Render
+app = Flask(__name__)
 
 questions = [
     {"text": "Когда Ваш старт? (например: 20.06.2025)", "type": "input"},
@@ -79,22 +77,19 @@ async def generate_program(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(result, reply_markup=ReplyKeyboardRemove())
     await update.message.reply_text("Спасибо! Удачи на тренировках! \U0001F4AA")
 
-# Flask + PTB Application
-app = Flask(__name__)
-
 application = Application.builder().token(TOKEN).build()
-
 application.add_handler(CommandHandler("start", start))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_answer))
 
 @app.route(f"/{TOKEN}", methods=["POST"])
-async def webhook() -> str:
-    data = request.json
-    update = Update.de_json(data, application.bot)
-    await application.process_update(update)
-    return 'ok'
+def webhook():
+    update = Update.de_json(request.get_json(force=True), application.bot)
+    application.update_queue.put_nowait(update)
+    return "ok"
 
-if __name__ == '__main__':
-    import asyncio
-    asyncio.run(application.initialize())
-    app.run(host="0.0.0.0", port=int(os.environ.get('PORT', 10000)))
+@app.route("/", methods=["GET"])
+def index():
+    return "Bot is running!"
+
+if __name__ == "__main__":
+    application.run_polling()
