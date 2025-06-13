@@ -1,11 +1,14 @@
 import os
+import logging
 from flask import Flask, request
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
-import asyncio
 
-TOKEN = os.getenv("TELEGRAM_TOKEN")
-WEBHOOK_URL = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}/{TOKEN}"
+# Включаем логирование
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+TOKEN = os.getenv("TOKEN")  # Лучше брать из переменных окружения на Render
 
 questions = [
     {"text": "Когда Ваш старт? (например: 20.06.2025)", "type": "input"},
@@ -18,8 +21,6 @@ questions = [
     {"text": "Сколько максимально пробегали за тренировку?", "type": "input"},
     {"text": "Какие соревнования бегали последнее время? (введите дистанцию и результат или нажмите 'Не участвовал')", "type": "multi_input", "options": ["Не участвовал"]}
 ]
-
-app = Flask(__name__)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['answers'] = {}
@@ -61,7 +62,6 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def generate_program(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = context.user_data['answers']
-    
     result = "\U0001F3C1 Ваша программа тренировок:\n\n"
     for key, value in data.items():
         result += f"{key}: {value}\n"
@@ -79,22 +79,22 @@ async def generate_program(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(result, reply_markup=ReplyKeyboardRemove())
     await update.message.reply_text("Спасибо! Удачи на тренировках! \U0001F4AA")
 
-@app.route(f'/{TOKEN}', methods=['POST'])
-def webhook():
-    update = Update.de_json(request.get_json(force=True), bot.application.bot)
-    asyncio.run(bot.application.process_update(update))
-    return "ok"
+# Flask + PTB Application
+app = Flask(__name__)
 
-@app.route('/', methods=['GET'])
-def index():
-    return "Bot is running!"
+application = Application.builder().token(TOKEN).build()
+
+application.add_handler(CommandHandler("start", start))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_answer))
+
+@app.route(f"/{TOKEN}", methods=["POST"])
+async def webhook() -> str:
+    data = request.json
+    update = Update.de_json(data, application.bot)
+    await application.process_update(update)
+    return 'ok'
 
 if __name__ == '__main__':
-    bot = Application.builder().token(TOKEN).build()
-    bot.add_handler(CommandHandler('start', start))
-    bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_answer))
-
-    # Устанавливаем Webhook при старте
-    asyncio.run(bot.bot.set_webhook(WEBHOOK_URL))
-
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 10000)))
+    import asyncio
+    asyncio.run(application.initialize())
+    app.run(host="0.0.0.0", port=int(os.environ.get('PORT', 10000)))
