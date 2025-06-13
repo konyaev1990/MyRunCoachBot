@@ -1,11 +1,7 @@
 
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
-from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 import os
-from flask import Flask, request
-
-TOKEN = os.getenv("TELEGRAM_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 
 questions = [
     {"text": "Когда Ваш старт? (например: 20.06.2025)", "type": "input"},
@@ -19,18 +15,15 @@ questions = [
     {"text": "Какие соревнования бегали последнее время? (введите дистанцию и результат или нажмите 'Не участвовал')", "type": "multi_input", "options": ["Не участвовал"]}
 ]
 
-user_data = {}
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_data[update.effective_chat.id] = {"answers": {}, "current_question": 0}
+    context.user_data['answers'] = {}
+    context.user_data['current_question'] = 0
     await ask_question(update, context)
 
 async def ask_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    data = user_data[update.effective_chat.id]
-    index = data["current_question"]
-
+    index = context.user_data['current_question']
     if index >= len(questions):
-        await generate_program(update)
+        await generate_program(update, context)
         return
 
     q = questions[index]
@@ -42,32 +35,32 @@ async def ask_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(q['text'], reply_markup=ReplyKeyboardRemove())
 
 async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    data = user_data[update.effective_chat.id]
-    index = data["current_question"]
+    index = context.user_data.get('current_question', 0)
     q = questions[index]
     answer = update.message.text
-    data["answers"][q['text']] = answer
+
+    context.user_data['answers'][q['text']] = answer
 
     if q['text'] == "Есть ли ограничения по здоровью или травмы?" and answer == "Другое":
-        data["awaiting_custom_input"] = True
+        context.user_data['awaiting_custom_input'] = True
         await update.message.reply_text("Уточните, пожалуйста:")
         return
 
-    if data.get("awaiting_custom_input"):
-        data["answers"]["Уточнение по травме"] = answer
-        data["awaiting_custom_input"] = False
+    if context.user_data.get('awaiting_custom_input'):
+        context.user_data['answers']['Уточнение по травме'] = answer
+        context.user_data['awaiting_custom_input'] = False
 
-    data["current_question"] += 1
+    context.user_data['current_question'] += 1
     await ask_question(update, context)
 
-async def generate_program(update: Update):
-    data = user_data[update.effective_chat.id]["answers"]
+async def generate_program(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    data = context.user_data['answers']
     result = "\U0001F3C1 Ваша программа тренировок:\n\n"
     for key, value in data.items():
         result += f"{key}: {value}\n"
 
-    dist = data.get("Какая дистанция?")
     result += "\n\U0001F4C5 Примерная структура недели:\n"
+    dist = data.get("Какая дистанция?")
 
     if dist == "42 км":
         result += "- Темповый бег\n- Интервалы\n- Долгий бег\n- Восстановление"
@@ -79,15 +72,15 @@ async def generate_program(update: Update):
     await update.message.reply_text(result, reply_markup=ReplyKeyboardRemove())
     await update.message.reply_text("Спасибо! Удачи на тренировках! \U0001F4AA")
 
-app = Flask(__name__)
-telegram_app = Application.builder().token(TOKEN).build()
-telegram_app.add_handler(CommandHandler("start", start))
-telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_answer))
-
-@app.route(f"/webhook/{TOKEN}", methods=["POST"])
-async def webhook() -> str:
-    await telegram_app.process_update(Update.de_json(request.get_json(force=True), telegram_app.bot))
-    return "OK"
-
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+    TOKEN = os.environ['TELEGRAM_TOKEN']
+    app = ApplicationBuilder().token(TOKEN).build()
+
+    app.add_handler(CommandHandler('start', start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_answer))
+
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=int(os.environ.get('PORT', 10000)),
+        webhook_url=f"https://{os.environ['RENDER_EXTERNAL_HOSTNAME']}/{TOKEN}"
+    )
