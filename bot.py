@@ -1,15 +1,9 @@
-
 import os
-import json
-from flask import Flask, request
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
-from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
+from flask import Flask, request
 
-TOKEN = os.environ['TELEGRAM_TOKEN']
-
-app = Flask(__name__)
-application = Application.builder().token(TOKEN).build()
-
+# Вопросы анкеты
 questions = [
     {"text": "Когда Ваш старт? (например: 20.06.2025)", "type": "input"},
     {"text": "Какая дистанция?", "options": ["800–3000 м", "3–10 км", "21 км", "42 км"]},
@@ -22,11 +16,22 @@ questions = [
     {"text": "Какие соревнования бегали последнее время? (введите дистанцию и результат или нажмите 'Не участвовал')", "type": "multi_input", "options": ["Не участвовал"]}
 ]
 
+# Flask app для webhook
+app = Flask(__name__)
+
+# Telegram Bot token из переменной окружения
+TOKEN = os.environ.get("TELEGRAM_TOKEN")
+
+# Создаём Telegram приложение
+telegram_app = ApplicationBuilder().token(TOKEN).build()
+
+# Команда /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['answers'] = {}
     context.user_data['current_question'] = 0
     await ask_question(update, context)
 
+# Задаём вопросы
 async def ask_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
     index = context.user_data['current_question']
     if index >= len(questions):
@@ -35,12 +40,13 @@ async def ask_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     q = questions[index]
     if 'options' in q:
-        buttons = [[KeyboardButton(opt)] for opt in q['options']]
+        buttons = [[KeyboardButton(option)] for option in q['options']]
         markup = ReplyKeyboardMarkup(buttons, one_time_keyboard=True, resize_keyboard=True)
         await update.message.reply_text(q['text'], reply_markup=markup)
     else:
         await update.message.reply_text(q['text'], reply_markup=ReplyKeyboardRemove())
 
+# Обработка ответов
 async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     index = context.user_data.get('current_question', 0)
     q = questions[index]
@@ -60,8 +66,10 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['current_question'] += 1
     await ask_question(update, context)
 
+# Генерация программы на основе ответов
 async def generate_program(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = context.user_data['answers']
+    
     result = "\U0001F3C1 Ваша программа тренировок:\n\n"
     for key, value in data.items():
         result += f"{key}: {value}\n"
@@ -79,14 +87,19 @@ async def generate_program(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(result, reply_markup=ReplyKeyboardRemove())
     await update.message.reply_text("Спасибо! Удачи на тренировках! \U0001F4AA")
 
-@app.post(f"/{TOKEN}")
-def webhook():
-    update = Update.de_json(request.get_json(force=True), application.bot)
-    application.update_queue.put_nowait(update)
-    return 'ok'
+# Регистрируем обработчики
+telegram_app.add_handler(CommandHandler("start", start))
+telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_answer))
 
-application.add_handler(CommandHandler("start", start))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_answer))
+# Webhook обработчик
+@app.route(f"/{TOKEN}", methods=["POST"])
+async def webhook():
+    data = request.get_json(force=True)
+    await telegram_app.process_update(Update.de_json(data, telegram_app.bot))
+    return "ok"
 
-if __name__ == '__main__':
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+# Проверка на главной странице
+@app.route("/", methods=["GET"])
+def home():
+    return "MyRunCoachBot is alive!"
+
