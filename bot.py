@@ -1,12 +1,11 @@
-
 import os
 from flask import Flask, request
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
+import asyncio
 
-app = Flask(__name__)
-TOKEN = os.environ.get("TELEGRAM_TOKEN")
-application = ApplicationBuilder().token(TOKEN).build()
+TOKEN = os.getenv("TELEGRAM_TOKEN")
+WEBHOOK_URL = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}/{TOKEN}"
 
 questions = [
     {"text": "Когда Ваш старт? (например: 20.06.2025)", "type": "input"},
@@ -19,6 +18,8 @@ questions = [
     {"text": "Сколько максимально пробегали за тренировку?", "type": "input"},
     {"text": "Какие соревнования бегали последнее время? (введите дистанцию и результат или нажмите 'Не участвовал')", "type": "multi_input", "options": ["Не участвовал"]}
 ]
+
+app = Flask(__name__)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['answers'] = {}
@@ -60,12 +61,14 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def generate_program(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = context.user_data['answers']
+    
     result = "\U0001F3C1 Ваша программа тренировок:\n\n"
     for key, value in data.items():
         result += f"{key}: {value}\n"
 
     result += "\n\U0001F4C5 Примерная структура недели:\n"
     dist = data.get("Какая дистанция?")
+
     if dist == "42 км":
         result += "- Темповый бег\n- Интервалы\n- Долгий бег\n- Восстановление"
     elif dist == "21 км":
@@ -76,15 +79,22 @@ async def generate_program(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(result, reply_markup=ReplyKeyboardRemove())
     await update.message.reply_text("Спасибо! Удачи на тренировках! \U0001F4AA")
 
-application.add_handler(CommandHandler("start", start))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_answer))
-
-@app.route("/", methods=["GET"])
-def home():
-    return "MyRunCoachBot is alive!"
-
-@app.route(f"/{TOKEN}", methods=["POST"])
-async def webhook():
-    data = request.get_json(force=True)
-    await application.process_update(Update.de_json(data, application.bot))
+@app.route(f'/{TOKEN}', methods=['POST'])
+def webhook():
+    update = Update.de_json(request.get_json(force=True), bot.application.bot)
+    asyncio.run(bot.application.process_update(update))
     return "ok"
+
+@app.route('/', methods=['GET'])
+def index():
+    return "Bot is running!"
+
+if __name__ == '__main__':
+    bot = Application.builder().token(TOKEN).build()
+    bot.add_handler(CommandHandler('start', start))
+    bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_answer))
+
+    # Устанавливаем Webhook при старте
+    asyncio.run(bot.bot.set_webhook(WEBHOOK_URL))
+
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 10000)))
