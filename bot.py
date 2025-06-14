@@ -1,26 +1,27 @@
 import os
 import logging
 from flask import Flask, request
-from telegram import Update, Bot, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
+import asyncio
 
-# Настройки логирования
-logging.basicConfig(level=logging.INFO)
+# Настройка логов
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 logger = logging.getLogger(__name__)
 
-# Получаем токен из переменных окружения
-TOKEN = os.environ.get("TOKEN")
-if not TOKEN:
-    raise ValueError("TOKEN is not set in environment variables")
+# Конфигурация
+TOKEN = os.getenv('TOKEN')
+WEBHOOK_URL = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}/{TOKEN}"
 
-# Создаем Flask приложение
+# Инициализация приложений
 app = Flask(__name__)
-
-# Создаем Telegram Application (PTB)
 application = Application.builder().token(TOKEN).build()
 
-# Вопросы анкеты
-questions = [
+# Анкета
+QUESTIONS = [
     {"text": "Когда Ваш старт? (например: 20.06.2025)", "type": "input"},
     {"text": "Какая дистанция?", "options": ["800–3000 м", "3–10 км", "21 км", "42 км"]},
     {"text": "Ваш уровень подготовки?", "options": ["Новичок", "Любитель", "Опытный"]},
@@ -29,37 +30,45 @@ questions = [
     {"text": "Сколько времени готовы тратить на тренировку?", "options": ["45 мин", "45–60 мин", "60–90 мин"]},
     {"text": "Есть ли ограничения по здоровью или травмы?", "options": ["Колени", "Надкостница", "Другое"]},
     {"text": "Сколько максимально пробегали за тренировку?", "type": "input"},
-    {"text": "Какие соревнования бегали последнее время? (введите дистанцию и результат или нажмите 'Не участвовал')", "type": "multi_input", "options": ["Не участвовал"]}
+    {"text": "Какие соревнования бегали последнее время? (введите дистанцию и результат или нажмите 'Не участвовал')", 
+     "type": "multi_input", "options": ["Не участвовал"]}
 ]
 
-# Обработчики команд (остаются без изменений)
+# Обработчики команд
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['answers'] = {}
+    """Обработчик команды /start"""
+    context.user_data.clear()
     context.user_data['current_question'] = 0
     await ask_question(update, context)
 
 async def ask_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    index = context.user_data['current_question']
-    if index >= len(questions):
+    """Задаем следующий вопрос"""
+    index = context.user_data.get('current_question', 0)
+    
+    if index >= len(QUESTIONS):
         await generate_program(update, context)
         return
-
-    q = questions[index]
-    if 'options' in q:
-        buttons = [[KeyboardButton(option)] for option in q['options']]
-        markup = ReplyKeyboardMarkup(buttons, one_time_keyboard=True, resize_keyboard=True)
-        await update.message.reply_text(q['text'], reply_markup=markup)
+    
+    question = QUESTIONS[index]
+    
+    if 'options' in question:
+        keyboard = [[KeyboardButton(option)] for option in question['options']]
+        await update.message.reply_text(
+            question['text'],
+            reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+        )
     else:
-        await update.message.reply_text(q['text'], reply_markup=ReplyKeyboardRemove())
+        await update.message.reply_text(question['text'], reply_markup=ReplyKeyboardRemove())
 
 async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка ответов пользователя"""
     index = context.user_data.get('current_question', 0)
-    q = questions[index]
+    question = QUESTIONS[index]
     answer = update.message.text
 
-    context.user_data['answers'][q['text']] = answer
+    context.user_data['answers'][question['text']] = answer
 
-    if q['text'] == "Есть ли ограничения по здоровью или травмы?" and answer == "Другое":
+    if question['text'] == "Есть ли ограничения по здоровью или травмы?" and answer == "Другое":
         context.user_data['awaiting_custom_input'] = True
         await update.message.reply_text("Уточните, пожалуйста:")
         return
@@ -72,6 +81,7 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await ask_question(update, context)
 
 async def generate_program(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Генерация программы тренировок"""
     data = context.user_data['answers']
     result = "\U0001F3C1 Ваша программа тренировок:\n\n"
     for key, value in data.items():
@@ -89,31 +99,46 @@ async def generate_program(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(result, reply_markup=ReplyKeyboardRemove())
     await update.message.reply_text("Спасибо! Удачи на тренировках! \U0001F4AA")
 
-# Подключаем handlers
+# Подключаем обработчики
 application.add_handler(CommandHandler("start", start))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_answer))
 
-# Webhook маршрут
-@app.route(f"/{TOKEN}", methods=["POST"])
-def webhook():
-    update = Update.de_json(request.get_json(force=True), application.bot)
-    application.update_queue.put(update)
-    return "OK"
+# Webhook обработчик
+@app.post(f'/{TOKEN}')
+async def telegram_webhook():
+    """Асинхронный обработчик вебхука"""
+    json_data = await request.get_json()
+    update = Update.de_json(json_data, application.bot)
+    await application.process_update(update)
+    return '', 200
 
-@app.route("/")
-def index():
-    return "Bot is running!"
+@app.get('/')
+def health_check():
+    """Проверка работоспособности"""
+    return 'Bot is running!', 200
 
+# Инициализация вебхука
 async def set_webhook():
-    webhook_url = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}/{TOKEN}"
-    await application.bot.set_webhook(webhook_url)
+    """Установка вебхука"""
+    await application.bot.set_webhook(WEBHOOK_URL)
 
 if __name__ == '__main__':
     # Для локальной разработки
-    if os.environ.get('ENV') == 'development':
+    if os.getenv('ENV') == 'development':
         application.run_polling()
     else:
         # Для продакшена на Render
-        port = int(os.environ.get("PORT", 5000))
-        # Запускаем Flask синхронно
-        app.run(host="0.0.0.0", port=port)
+        port = int(os.getenv('PORT', 5000))
+        
+        # Запускаем Flask с поддержкой асинхронности
+        from hypercorn.asyncio import serve
+        from hypercorn.config import Config
+        
+        config = Config()
+        config.bind = [f"0.0.0.0:{port}"]
+        
+        async def run():
+            await set_webhook()
+            await serve(app, config)
+        
+        asyncio.run(run())
