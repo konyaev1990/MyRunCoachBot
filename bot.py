@@ -1,9 +1,8 @@
 import os
 import logging
-import asyncio
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes
 from flask import Flask, request
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
-from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
 # Настройка логгирования
 logging.basicConfig(
@@ -13,52 +12,50 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Конфигурация
-TOKEN = os.getenv('TOKEN')
-WEBHOOK_URL = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}/{TOKEN}"
+TOKEN = os.getenv("BOT_TOKEN")  # Установите переменную окружения
+WEBHOOK_URL = f"https://{os.getenv('DOMAIN')}/{TOKEN}"   # Например, mybot.onrender.com
 
 # Инициализация приложений
 app = Flask(__name__)
 application = Application.builder().token(TOKEN).build()
 
-# Вопросы анкеты (оставьте ваши текущие вопросы)
+# Пример команды /start
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Привет! Я бот, работающий на веб-сервере.")
 
-# Обработчики команд (оставьте ваши текущие обработчики start, ask_question и др.)
+# Регистрация обработчиков
+application.add_handler(CommandHandler("start", start))
 
-# Webhook обработчик
-@app.post(f'/{TOKEN}')
-def telegram_webhook():
+# Webhook маршрут
+@app.post(f"/{TOKEN}")
+async def telegram_webhook():
     try:
-        update = Update.de_json(request.get_json(), application.bot)
-        application.update_queue.put_nowait(update)
+        json_data = request.get_json()
+        update = Update.de_json(json_data, application.bot)
+        await application.update_queue.put(update)
         return '', 200
     except Exception as e:
-        logger.error(f"Webhook error: {e}")
+        logger.error(f"Ошибка webhook: {e}")
         return '', 500
 
-@app.get('/')
-def health_check():
-    return 'Bot is running!', 200
+@app.get("/")
+async def health_check():
+    return "Бот работает!", 200
 
-async def main():
+# Инициализация webhook
+async def set_webhook():
     await application.initialize()
-    await application.bot.set_webhook(WEBHOOK_URL)
-    await application.start()
+    await application.bot.set_webhook(url=WEBHOOK_URL)
 
-if __name__ == '__main__':
-    if os.getenv('ENV') == 'development':
-        application.run_polling()
-    else:
-        # Production режим для Render
-        port = int(os.getenv('PORT', 5000))
-        
-        from hypercorn.asyncio import serve
-        from hypercorn.config import Config
-        
-        config = Config()
-        config.bind = [f"0.0.0.0:{port}"]
-        
-        try:
-            asyncio.run(main())
-            asyncio.run(serve(app, config))
-        except Exception as e:
-            logger.error(f"Server error: {e}")
+# Точка входа для WSGI-совместимого сервера
+def main():
+    import asyncio
+    from hypercorn.asyncio import serve
+    from hypercorn.config import Config
+
+    asyncio.run(set_webhook())
+
+    config = Config()
+    config.bind = [f"0.0.0.0:{os.getenv('PORT', 5000)}"]
+    from hypercorn.asyncio import serve
+    asyncio.run(serve(app, config))
