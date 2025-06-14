@@ -1,11 +1,10 @@
+
 import os
 from flask import Flask, request
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
-TOKEN = os.getenv("BOT_TOKEN")
-WEBHOOK_PATH = f"/{TOKEN}"
-WEBHOOK_URL = os.getenv("WEBHOOK_URL") + WEBHOOK_PATH
+TOKEN = os.environ.get("BOT_TOKEN")
 
 questions = [
     {"text": "Когда Ваш старт? (например: 20.06.2025)", "type": "input"},
@@ -19,16 +18,20 @@ questions = [
     {"text": "Какие соревнования бегали последнее время? (введите дистанцию и результат или нажмите 'Не участвовал')", "type": "multi_input", "options": ["Не участвовал"]}
 ]
 
+user_states = {}
+
 app = Flask(__name__)
 application = Application.builder().token(TOKEN).build()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['answers'] = {}
-    context.user_data['current_question'] = 0
+    user_id = update.effective_user.id
+    user_states[user_id] = {"answers": {}, "current_question": 0, "awaiting_custom_input": False}
     await ask_question(update, context)
 
 async def ask_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    index = context.user_data['current_question']
+    user_id = update.effective_user.id
+    state = user_states[user_id]
+    index = state["current_question"]
     if index >= len(questions):
         await generate_program(update, context)
         return
@@ -42,28 +45,34 @@ async def ask_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(q['text'], reply_markup=ReplyKeyboardRemove())
 
 async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    index = context.user_data.get('current_question', 0)
+    user_id = update.effective_user.id
+    state = user_states[user_id]
+    index = state["current_question"]
     q = questions[index]
     answer = update.message.text
-    context.user_data['answers'][q['text']] = answer
+
+    state['answers'][q['text']] = answer
 
     if q['text'] == "Есть ли ограничения по здоровью или травмы?" and answer == "Другое":
-        context.user_data['awaiting_custom_input'] = True
+        state['awaiting_custom_input'] = True
         await update.message.reply_text("Уточните, пожалуйста:")
         return
 
-    if context.user_data.get('awaiting_custom_input'):
-        context.user_data['answers']['Уточнение по травме'] = answer
-        context.user_data['awaiting_custom_input'] = False
+    if state.get('awaiting_custom_input'):
+        state['answers']['Уточнение по травме'] = answer
+        state['awaiting_custom_input'] = False
 
-    context.user_data['current_question'] += 1
+    state['current_question'] += 1
     await ask_question(update, context)
 
 async def generate_program(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    data = context.user_data['answers']
+    user_id = update.effective_user.id
+    data = user_states[user_id]['answers']
+
     result = "\U0001F3C1 Ваша программа тренировок:\n\n"
     for key, value in data.items():
         result += f"{key}: {value}\n"
+
     result += "\n\U0001F4C5 Примерная структура недели:\n"
     dist = data.get("Какая дистанция?")
 
@@ -77,13 +86,18 @@ async def generate_program(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(result, reply_markup=ReplyKeyboardRemove())
     await update.message.reply_text("Спасибо! Удачи на тренировках! \U0001F4AA")
 
-@application.route(WEBHOOK_PATH, methods=["POST"])
+application.add_handler(CommandHandler("start", start))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_answer))
+
+@app.route(f"/{TOKEN}", methods=["POST"])
 def webhook():
     update = Update.de_json(request.get_json(force=True), application.bot)
     application.update_queue.put_nowait(update)
-    return "OK"
+    return "OK", 200
 
-if __name__ == '__main__':
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_answer))
-    application.run_webhook(listen="0.0.0.0", port=int(os.environ.get("PORT", 10000)), webhook_url=WEBHOOK_URL)
+@app.route("/", methods=["GET"])
+def index():
+    return "Webhook running!", 200
+
+if __name__ == "__main__":
+    application.run_polling()
