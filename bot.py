@@ -1,15 +1,11 @@
 import os
 import logging
+import asyncio
 from flask import Flask, request
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters
-)
-import asyncio
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
+from hypercorn.asyncio import serve
+from hypercorn.config import Config
 
 # Настройка логгирования
 logging.basicConfig(
@@ -41,13 +37,11 @@ QUESTIONS = [
 
 # Обработчики команд
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик команды /start"""
     context.user_data.clear()
     context.user_data['current_question'] = 0
     await ask_question(update, context)
 
 async def ask_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Задаем следующий вопрос"""
     index = context.user_data.get('current_question', 0)
     
     if index >= len(QUESTIONS):
@@ -66,7 +60,6 @@ async def ask_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(question['text'], reply_markup=ReplyKeyboardRemove())
 
 async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка ответов пользователя"""
     index = context.user_data.get('current_question', 0)
     question = QUESTIONS[index]
     answer = update.message.text
@@ -89,7 +82,6 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await ask_question(update, context)
 
 async def generate_program(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Генерация программы тренировок"""
     data = context.user_data['answers']
     result = "🏁 Ваша программа тренировок:\n\n"
     for key, value in data.items():
@@ -114,53 +106,34 @@ application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_a
 # Обработчик вебхука
 @app.post(f'/{TOKEN}')
 async def telegram_webhook():
-    """Асинхронный обработчик вебхука"""
     try:
-        json_data = await request.get_json()
+        json_data = request.get_json()
         update = Update.de_json(json_data, application.bot)
         await application.update_queue.put(update)
         return '', 200
     except Exception as e:
-        logger.error(f"Error processing update: {e}")
+        logger.error(f"Webhook error: {e}\nRequest data: {request.data}")
         return '', 500
 
 @app.get('/')
 def health_check():
-    """Проверка работоспособности"""
     return 'Bot is running!', 200
 
-# Инициализация
-async def setup_webhook():
-    """Установка вебхука"""
-    try:
-        await application.bot.set_webhook(WEBHOOK_URL)
-        logger.info(f"Webhook set to {WEBHOOK_URL}")
-    except Exception as e:
-        logger.error(f"Error setting webhook: {e}")
-        raise
-
-async def run():
-    """Основная функция запуска"""
+# Инициализация приложения
+async def initialize():
     await application.initialize()
-    await setup_webhook()
+    await application.bot.set_webhook(WEBHOOK_URL)
     await application.start()
 
+async def run_server():
+    await initialize()
+    config = Config()
+    config.bind = [f"0.0.0.0:{os.getenv('PORT', 5000)}"]
+    await serve(app, config)
+
 if __name__ == '__main__':
-    # Для локальной разработки
-    if os.getenv('ENV') == 'development':
-        application.run_polling()
-    else:
-        # Для продакшена на Render
-        port = int(os.getenv('PORT', 5000))
-        
-        from hypercorn.asyncio import serve
-        from hypercorn.config import Config
-        
-        config = Config()
-        config.bind = [f"0.0.0.0:{port}"]
-        
-        try:
-            asyncio.run(run())
-            asyncio.run(serve(app, config))
-        except Exception as e:
-            logger.error(f"Application error: {e}")
+    try:
+        asyncio.run(run_server())
+    except Exception as e:
+        logger.critical(f"Application failed: {e}")
+        raise
