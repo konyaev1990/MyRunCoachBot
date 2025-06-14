@@ -1,13 +1,12 @@
-
+# bot.py
 import os
 from flask import Flask, request
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
-# Токен через переменные окружения
-TOKEN = os.getenv("BOT_TOKEN")
+TOKEN = os.environ.get("TELEGRAM_TOKEN")
+app = Flask(__name__)
 
-# Вопросы анкеты
 questions = [
     {"text": "Когда Ваш старт? (например: 20.06.2025)", "type": "input"},
     {"text": "Какая дистанция?", "options": ["800–3000 м", "3–10 км", "21 км", "42 км"]},
@@ -20,13 +19,17 @@ questions = [
     {"text": "Какие соревнования бегали последнее время? (введите дистанцию и результат или нажмите 'Не участвовал')", "type": "multi_input", "options": ["Не участвовал"]}
 ]
 
+user_data = {}
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['answers'] = {}
-    context.user_data['current_question'] = 0
+    chat_id = update.effective_chat.id
+    user_data[chat_id] = {"answers": {}, "current_question": 0}
     await ask_question(update, context)
 
 async def ask_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    index = context.user_data['current_question']
+    chat_id = update.effective_chat.id
+    index = user_data[chat_id]["current_question"]
+    
     if index >= len(questions):
         await generate_program(update, context)
         return
@@ -40,30 +43,31 @@ async def ask_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(q['text'], reply_markup=ReplyKeyboardRemove())
 
 async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    index = context.user_data.get('current_question', 0)
+    chat_id = update.effective_chat.id
+    index = user_data[chat_id]["current_question"]
     q = questions[index]
     answer = update.message.text
 
-    context.user_data['answers'][q['text']] = answer
+    user_data[chat_id]['answers'][q['text']] = answer
 
     if q['text'] == "Есть ли ограничения по здоровью или травмы?" and answer == "Другое":
-        context.user_data['awaiting_custom_input'] = True
+        user_data[chat_id]['awaiting_custom_input'] = True
         await update.message.reply_text("Уточните, пожалуйста:")
         return
 
-    if context.user_data.get('awaiting_custom_input'):
-        context.user_data['answers']['Уточнение по травме'] = answer
-        context.user_data['awaiting_custom_input'] = False
+    if user_data[chat_id].get('awaiting_custom_input'):
+        user_data[chat_id]['answers']['Уточнение по травме'] = answer
+        user_data[chat_id]['awaiting_custom_input'] = False
 
-    context.user_data['current_question'] += 1
+    user_data[chat_id]["current_question"] += 1
     await ask_question(update, context)
 
 async def generate_program(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    data = context.user_data['answers']
+    chat_id = update.effective_chat.id
+    data = user_data[chat_id]['answers']
     result = "\U0001F3C1 Ваша программа тренировок:\n\n"
     for key, value in data.items():
         result += f"{key}: {value}\n"
-
     result += "\n\U0001F4C5 Примерная структура недели:\n"
     dist = data.get("Какая дистанция?")
 
@@ -77,20 +81,23 @@ async def generate_program(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(result, reply_markup=ReplyKeyboardRemove())
     await update.message.reply_text("Спасибо! Удачи на тренировках! \U0001F4AA")
 
-app_flask = Flask(__name__)
 application = Application.builder().token(TOKEN).build()
-
 application.add_handler(CommandHandler("start", start))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_answer))
 
-@app_flask.route(f"/{TOKEN}", methods=["POST"])
-def webhook() -> str:
-    application.update_queue.put_nowait(Update.de_json(request.json, application.bot))
+@app.route(f"/{TOKEN}", methods=["POST"])
+def webhook():
+    update = Update.de_json(request.get_json(force=True), application.bot)
+    application.update_queue.put_nowait(update)
     return "ok"
 
-@app_flask.route("/")
-def index() -> str:
+@app.route("/")
+def index():
     return "Bot is running!"
 
 if __name__ == "__main__":
-    app_flask.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+    application.run_webhook(
+        listen="0.0.0.0",
+        port=int(os.environ.get("PORT", 10000)),
+        webhook_url=f"https://{os.environ['RENDER_EXTERNAL_HOSTNAME']}/{TOKEN}"
+    )
