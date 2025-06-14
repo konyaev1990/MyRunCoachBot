@@ -2,9 +2,7 @@ import os
 import logging
 from flask import Flask, request
 from telegram import Update, Bot, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
-from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters, CallbackContext
-from telegram.ext import Dispatcher
-import asyncio
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
 # Настройки логирования
 logging.basicConfig(level=logging.INFO)
@@ -18,7 +16,7 @@ if not TOKEN:
 # Создаем Flask приложение
 app = Flask(__name__)
 
-# Создаем Telegram Application (PTB 21.1)
+# Создаем Telegram Application (PTB)
 application = Application.builder().token(TOKEN).build()
 
 # Вопросы анкеты
@@ -34,13 +32,12 @@ questions = [
     {"text": "Какие соревнования бегали последнее время? (введите дистанцию и результат или нажмите 'Не участвовал')", "type": "multi_input", "options": ["Не участвовал"]}
 ]
 
-# Команда /start
+# Обработчики команд (остаются без изменений)
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['answers'] = {}
     context.user_data['current_question'] = 0
     await ask_question(update, context)
 
-# Задаем вопросы
 async def ask_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
     index = context.user_data['current_question']
     if index >= len(questions):
@@ -55,7 +52,6 @@ async def ask_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(q['text'], reply_markup=ReplyKeyboardRemove())
 
-# Обрабатываем ответы
 async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     index = context.user_data.get('current_question', 0)
     q = questions[index]
@@ -75,7 +71,6 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['current_question'] += 1
     await ask_question(update, context)
 
-# Финальный результат
 async def generate_program(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = context.user_data['answers']
     result = "\U0001F3C1 Ваша программа тренировок:\n\n"
@@ -98,17 +93,27 @@ async def generate_program(update: Update, context: ContextTypes.DEFAULT_TYPE):
 application.add_handler(CommandHandler("start", start))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_answer))
 
-# Flask webhook маршрут
+# Webhook маршрут
 @app.route(f"/{TOKEN}", methods=["POST"])
 def webhook():
     update = Update.de_json(request.get_json(force=True), application.bot)
-    asyncio.run(application.process_update(update))
+    application.update_queue.put(update)
     return "OK"
 
 @app.route("/")
 def index():
     return "Bot is running!"
 
-# Запуск локально (только для отладки)
+async def set_webhook():
+    webhook_url = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}/{TOKEN}"
+    await application.bot.set_webhook(webhook_url)
+
 if __name__ == '__main__':
-    app.run(port=5000)
+    # Для локальной разработки
+    if os.environ.get('ENV') == 'development':
+        application.run_polling()
+    else:
+        # Для продакшена на Render
+        port = int(os.environ.get("PORT", 5000))
+        # Запускаем Flask синхронно
+        app.run(host="0.0.0.0", port=port)
