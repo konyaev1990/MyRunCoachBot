@@ -1,5 +1,6 @@
 import logging
 import os
+import sys
 from telegram import (
     Update,
     ReplyKeyboardMarkup,
@@ -14,12 +15,28 @@ from telegram.ext import (
     filters,
     ConversationHandler
 )
-from dotenv import load_dotenv
-import google.generativeai as genai
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    print("[ERROR] Не установлен python-dotenv. Установите командой: pip install python-dotenv")
+    sys.exit(1)
+try:
+    import google.generativeai as genai
+except ImportError:
+    print("[ERROR] Не установлен google-generativeai. Установите командой: pip install google-generativeai")
+    sys.exit(1)
 
 # Загрузка переменных окружения
 load_dotenv()
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+if not GEMINI_API_KEY:
+    print("[ERROR] Не найден GEMINI_API_KEY в переменных окружения.")
+    sys.exit(1)
+if not TELEGRAM_TOKEN:
+    print("[ERROR] Не найден TELEGRAM_TOKEN в переменных окружения.")
+    sys.exit(1)
+genai.configure(api_key=GEMINI_API_KEY)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -72,18 +89,20 @@ user_data = {}
 
 def generate_prompt(answers):
     parts = [f"{q['text']} {answers.get(q['text'], '')}" for q in QUESTIONS]
-    return """Составь беговую программу на основе следующих ответов:
-
-""" + "\n".join(parts) + """
-"""
+    return """Составь беговую программу на основе следующих ответов:\n\n""" + "\n".join(parts) + """\n"""
 
 def generate_training_program(answers):
     prompt = generate_prompt(answers)
-    model = genai.GenerativeModel("gemini-pro")
-    response = model.generate_content(prompt)
-    return response.text if hasattr(response, "text") else str(response)
+    try:
+        model = genai.GenerativeModel("gemini-pro")
+        response = model.generate_content(prompt)
+        return response.text if hasattr(response, "text") else str(response)
+    except Exception as e:
+        logger.error(f"Ошибка генерации программы: {e}")
+        return "Извините, не удалось сгенерировать программу. Попробуйте позже."
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # type: ignore[attr-defined]
     user_id = update.effective_user.id
     user_data[user_id] = {}
     context.user_data.clear()
@@ -95,6 +114,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return QUESTION
 
 async def ask_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # type: ignore[attr-defined]
     current_index = context.user_data.get("current_index", -1) + 1
     if current_index >= len(QUESTIONS):
         return await finish_questionnaire(update, context)
@@ -110,6 +130,7 @@ async def ask_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(question["text"], reply_markup=reply_markup)
 
 async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # type: ignore[attr-defined]
     user_id = update.effective_user.id
     answer = update.message.text
     current_question = context.user_data["current_question"]
@@ -134,7 +155,11 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return QUESTION
 
 async def finish_questionnaire(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # type: ignore[attr-defined]
     user_id = update.effective_user.id
+    if user_id not in user_data or not user_data[user_id]:
+        await update.message.reply_text("Нет данных для генерации программы.")
+        return ConversationHandler.END
     program = generate_training_program(user_data[user_id])
     await update.message.reply_text(
         program,
@@ -148,6 +173,7 @@ async def finish_questionnaire(update: Update, context: ContextTypes.DEFAULT_TYP
     return ConversationHandler.END
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # type: ignore[attr-defined]
     user_id = update.effective_user.id
     if user_id in user_data:
         del user_data[user_id]
@@ -159,7 +185,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 def main():
-    application = ApplicationBuilder().token(os.getenv("TELEGRAM_TOKEN")).build()
+    application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('start', start)],
         states={
