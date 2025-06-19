@@ -1,7 +1,5 @@
 import logging
 import os
-import json
-import psycopg2
 from telegram import (
     Update,
     ReplyKeyboardMarkup,
@@ -32,39 +30,47 @@ logger = logging.getLogger(__name__)
 
 # Вопросы анкеты
 QUESTIONS = [
-    {"text": "Когда Ваш старт? (например 20.06.2025)", "type": "input"},
-    {"text": "Какая дистанция?", "options": ["800–3000 м", "3–10 км", "21 км", "42 км"]},
-    {"text": "Ваш уровень подготовки?", "options": ["Новичок", "Любитель", "Опытный"]},
-    {"text": "Сколько дней в неделю планируете бегать?", "options": ["1", "3", "5", "7"]},
-    {"text": "Где будут проходить тренировки?", "options": ["Лес", "Парк", "Стадион", "Беговая дорожка"]},
-    {"text": "Сколько времени готовы тратить на тренировку?", "options": ["до 45 мин", "45–60 мин", "60–90 мин"]},
-    {"text": "Есть ли ограничения по здоровью или травмы?", "options": ["Болят колени", "Болит надкостница", "Другое"]},
-    {"text": "Сколько максимально километров пробегали за тренировку?", "type": "input"},
-    {"text": "За последние три месяца в каких соревнованиях принимали участие? (введите дистанцию и результат или нажмите 'Не участвовал')", "type": "multi_input", "options": ["Не участвовал"]}
+    {
+        "text": "Когда Ваш старт? (например 20.06.2025)",
+        "type": "input"
+    },
+    {
+        "text": "Какая дистанция?",
+        "options": ["800–3000 м", "3–10 км", "21 км", "42 км"]
+    },
+    {
+        "text": "Ваш уровень подготовки?",
+        "options": ["Новичок", "Любитель", "Опытный"]
+    },
+    {
+        "text": "Сколько дней в неделю планируете бегать?",
+        "options": ["1", "3", "5", "7"]
+    },
+    {
+        "text": "Где будут проходить тренировки?",
+        "options": ["Лес", "Парк", "Стадион", "Беговая дорожка"]
+    },
+    {
+        "text": "Сколько времени готовы тратить на тренировку?",
+        "options": ["до 45 мин", "45–60 мин", "60–90 мин"]
+    },
+    {
+        "text": "Есть ли ограничения по здоровью или травмы?",
+        "options": ["Болят колени", "Болит надкостница", "Другое"]
+    },
+    {
+        "text": "Сколько максимально километров пробегали за тренировку?",
+        "type": "input"
+    },
+    {
+        "text": "За последние три месяца в каких соревнованиях принимали участие? (введите дистанцию и результат или нажмите 'Не участвовал')",
+        "type": "multi_input",
+        "options": ["Не участвовал"]
+    }
 ]
 
 QUESTION, CLARIFICATION = range(2)
 user_data = {}
-
-def save_to_database(user_id, answers, program):
-    try:
-        conn = psycopg2.connect(os.getenv("DATABASE_URL"))
-        cur = conn.cursor()
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS runners (
-                id SERIAL PRIMARY KEY,
-                telegram_id BIGINT,
-                answers JSONB,
-                program TEXT
-            )
-        """)
-        cur.execute("INSERT INTO runners (telegram_id, answers, program) VALUES (%s, %s, %s)",
-                    (user_id, json.dumps(answers, ensure_ascii=False), program))
-        conn.commit()
-        cur.close()
-        conn.close()
-    except Exception as e:
-        logger.error(f"Ошибка при сохранении в базу: {e}")
 
 def generate_prompt(answers):
     parts = [f"{q['text']} {answers.get(q['text'], '')}" for q in QUESTIONS]
@@ -80,7 +86,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_data[user_id] = {}
     context.user_data.clear()
-    await update.message.reply_text("Привет! Я помогу составить программу тренировок. Давайте заполним анкету.", reply_markup=ReplyKeyboardRemove())
+    await update.message.reply_text(
+        "Привет! Я помогу составить программу тренировок. Давайте заполним анкету.",
+        reply_markup=ReplyKeyboardRemove()
+    )
     await ask_question(update, context)
     return QUESTION
 
@@ -125,11 +134,15 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def finish_questionnaire(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    answers = user_data[user_id]
-    program = generate_training_program(answers)
-    save_to_database(user_id, answers, program)
-    await update.message.reply_text(program, reply_markup=ReplyKeyboardRemove(), parse_mode="Markdown")
-    await update.message.reply_text("Спасибо за заполнение анкеты! Удачных тренировок! 💪\nДля новой анкеты нажмите /start")
+    program = generate_training_program(user_data[user_id])
+    await update.message.reply_text(
+        program,
+        reply_markup=ReplyKeyboardRemove(),
+        parse_mode="Markdown"
+    )
+    await update.message.reply_text(
+        "Спасибо за заполнение анкеты! Удачных тренировок! 💪\nДля новой анкеты нажмите /start"
+    )
     context.user_data.clear()
     return ConversationHandler.END
 
@@ -137,7 +150,10 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id in user_data:
         del user_data[user_id]
-    await update.message.reply_text("Анкета отменена. Чтобы начать заново, нажмите /start", reply_markup=ReplyKeyboardRemove())
+    await update.message.reply_text(
+        "Анкета отменена. Чтобы начать заново, нажмите /start",
+        reply_markup=ReplyKeyboardRemove()
+    )
     context.user_data.clear()
     return ConversationHandler.END
 
