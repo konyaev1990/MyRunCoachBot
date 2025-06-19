@@ -21,14 +21,12 @@ import google.generativeai as genai
 load_dotenv()
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
-# Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-# Вопросы анкеты
 QUESTIONS = [
     {
         "text": "Когда Ваш старт? (например 20.06.2025)",
@@ -75,6 +73,7 @@ user_data = {}
 def generate_prompt(answers):
     parts = [f"{q['text']} {answers.get(q['text'], '')}" for q in QUESTIONS]
     return """Составь беговую программу на основе следующих ответов:
+
 """ + "\n".join(parts) + """
 """
 
