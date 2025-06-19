@@ -74,7 +74,9 @@ user_data = {}
 
 def generate_prompt(answers):
     parts = [f"{q['text']} {answers.get(q['text'], '')}" for q in QUESTIONS]
-    return """Составь беговую программу на основе следующих ответов:\n" + "\n".join(parts)
+    return """Составь беговую программу на основе следующих ответов:
+""" + "\n".join(parts) + """
+"""
 
 def generate_training_program(answers):
     prompt = generate_prompt(answers)
