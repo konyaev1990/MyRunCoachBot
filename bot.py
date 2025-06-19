@@ -1,74 +1,160 @@
-import asyncio
 import logging
 import os
-
-import uvicorn
-from starlette.applications import Starlette
-from starlette.requests import Request
-from starlette.responses import PlainTextResponse, Response
-from starlette.routing import Route
-
-from telegram import Update
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    ContextTypes,
-    MessageHandler,
-    filters,
+import json
+import psycopg2
+from telegram import (
+    Update,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardRemove
 )
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+    ConversationHandler
+)
+from dotenv import load_dotenv
+import google.generativeai as genai
 
-# Логирование
+# Загрузка переменных окружения
+load_dotenv()
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+
+# Настройка логирования
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-# Переменные окружения
-TOKEN = os.environ.get("TELEGRAM_TOKEN")
-URL = os.environ.get("RENDER_EXTERNAL_URL")
-PORT = int(os.environ.get("PORT", 10000))
+# Вопросы анкеты
+QUESTIONS = [
+    {"text": "Когда Ваш старт? (например 20.06.2025)", "type": "input"},
+    {"text": "Какая дистанция?", "options": ["800–3000 м", "3–10 км", "21 км", "42 км"]},
+    {"text": "Ваш уровень подготовки?", "options": ["Новичок", "Любитель", "Опытный"]},
+    {"text": "Сколько дней в неделю планируете бегать?", "options": ["1", "3", "5", "7"]},
+    {"text": "Где будут проходить тренировки?", "options": ["Лес", "Парк", "Стадион", "Беговая дорожка"]},
+    {"text": "Сколько времени готовы тратить на тренировку?", "options": ["до 45 мин", "45–60 мин", "60–90 мин"]},
+    {"text": "Есть ли ограничения по здоровью или травмы?", "options": ["Болят колени", "Болит надкостница", "Другое"]},
+    {"text": "Сколько максимально километров пробегали за тренировку?", "type": "input"},
+    {"text": "За последние три месяца в каких соревнованиях принимали участие? (введите дистанцию и результат или нажмите 'Не участвовал')", "type": "multi_input", "options": ["Не участвовал"]}
+]
 
-# Хэндлер старт-команды
+QUESTION, CLARIFICATION = range(2)
+user_data = {}
+
+def save_to_database(user_id, answers, program):
+    try:
+        conn = psycopg2.connect(os.getenv("DATABASE_URL"))
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS runners (
+                id SERIAL PRIMARY KEY,
+                telegram_id BIGINT,
+                answers JSONB,
+                program TEXT
+            )
+        """)
+        cur.execute("INSERT INTO runners (telegram_id, answers, program) VALUES (%s, %s, %s)",
+                    (user_id, json.dumps(answers, ensure_ascii=False), program))
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        logger.error(f"Ошибка при сохранении в базу: {e}")
+
+def generate_prompt(answers):
+    parts = [f"{q['text']} {answers.get(q['text'], '')}" for q in QUESTIONS]
+    return "Составь беговую программу на основе следующих ответов:\n" + "\n".join(parts)
+
+def generate_training_program(answers):
+    prompt = generate_prompt(answers)
+    model = genai.GenerativeModel("gemini-pro")
+    response = model.generate_content(prompt)
+    return response.text if hasattr(response, "text") else str(response)
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Привет! Я работаю через Render Webhook 🚀")
+    user_id = update.effective_user.id
+    user_data[user_id] = {}
+    context.user_data.clear()
+    await update.message.reply_text("Привет! Я помогу составить программу тренировок. Давайте заполним анкету.", reply_markup=ReplyKeyboardRemove())
+    await ask_question(update, context)
+    return QUESTION
 
-# Эхо-хэндлер
-async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(update.message.text)
+async def ask_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    current_index = context.user_data.get("current_index", -1) + 1
+    if current_index >= len(QUESTIONS):
+        return await finish_questionnaire(update, context)
 
-# Основной запуск
-async def main():
-    application = Application.builder().token(TOKEN).updater(None).build()
+    question = QUESTIONS[current_index]
+    context.user_data["current_index"] = current_index
+    context.user_data["current_question"] = question
+    reply_markup = None
+    if "options" in question:
+        buttons = [[KeyboardButton(option)] for option in question["options"]]
+        reply_markup = ReplyKeyboardMarkup(buttons, resize_keyboard=True, one_time_keyboard=True)
 
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
+    await update.message.reply_text(question["text"], reply_markup=reply_markup)
 
-    await application.bot.set_webhook(url=f"{URL}/webhook")
+async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    answer = update.message.text
+    current_question = context.user_data["current_question"]
 
-    async def webhook_handler(request: Request) -> Response:
-        data = await request.json()
-        update = Update.de_json(data, application.bot)
-        await application.update_queue.put(update)
-        return Response()
+    if context.user_data.get("awaiting_clarification"):
+        user_data[user_id][current_question["text"]] = f"Другое: {answer}"
+        context.user_data["awaiting_clarification"] = False
+        await ask_question(update, context)
+        return QUESTION
 
-    async def healthcheck(_: Request) -> PlainTextResponse:
-        return PlainTextResponse("OK")
+    if "options" in current_question and answer not in current_question["options"]:
+        await update.message.reply_text("Пожалуйста, выберите вариант из предложенных:")
+        return QUESTION
 
-    app = Starlette(
-        routes=[
-            Route("/webhook", webhook_handler, methods=["POST"]),
-            Route("/healthcheck", healthcheck, methods=["GET"]),
-        ]
+    if answer == "Другое" and "options" in current_question:
+        context.user_data["awaiting_clarification"] = True
+        await update.message.reply_text("Пожалуйста, уточните:")
+        return CLARIFICATION
+
+    user_data[user_id][current_question["text"]] = answer
+    await ask_question(update, context)
+    return QUESTION
+
+async def finish_questionnaire(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    answers = user_data[user_id]
+    program = generate_training_program(answers)
+    save_to_database(user_id, answers, program)
+    await update.message.reply_text(program, reply_markup=ReplyKeyboardRemove(), parse_mode="Markdown")
+    await update.message.reply_text("Спасибо за заполнение анкеты! Удачных тренировок! 💪\nДля новой анкеты нажмите /start")
+    context.user_data.clear()
+    return ConversationHandler.END
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id in user_data:
+        del user_data[user_id]
+    await update.message.reply_text("Анкета отменена. Чтобы начать заново, нажмите /start", reply_markup=ReplyKeyboardRemove())
+    context.user_data.clear()
+    return ConversationHandler.END
+
+def main():
+    application = ApplicationBuilder().token(os.getenv("TELEGRAM_TOKEN")).build()
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler('start', start)],
+        states={
+            QUESTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_answer)],
+            CLARIFICATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_answer)]
+        },
+        fallbacks=[CommandHandler('cancel', cancel)],
+        allow_reentry=True
     )
+    application.add_handler(conv_handler)
+    logger.info("Бот запущен")
+    application.run_polling()
 
-    webserver = uvicorn.Server(
-        config=uvicorn.Config(app=app, host="0.0.0.0", port=PORT, log_level="info")
-    )
-
-    async with application:
-        await application.start()
-        await webserver.serve()
-        await application.stop()
-
-if __name__ == "__main__":
-    asyncio.run(main())
+if __name__ == '__main__':
+    main()
